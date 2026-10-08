@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ASCII Virus Infiltration</title>
+    <title>ASCII Virus Slingshot</title>
     <style>
         body, html {
             margin: 0;
@@ -24,7 +24,6 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            box-shadow: inset 0 0 100px rgba(0, 255, 0, 0.1);
         }
 
         canvas {
@@ -33,58 +32,72 @@
             height: 100%;
         }
 
-        /* Scanline effect for retro feel */
+        /* Scanline effect for retro terminal feel */
         #game-container::after {
             content: " ";
             display: block;
             position: absolute;
-            top: 0;
-            left: 0;
-            bottom: 0;
-            right: 0;
-            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
             z-index: 10;
             background-size: 100% 4px, 3px 100%;
             pointer-events: none;
+        }
+
+        /* Tooltip styling */
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 20, 0, 0.95);
+            border: 1px solid #0f0;
+            color: #0f0;
+            padding: 10px;
+            font-size: 14px;
+            pointer-events: none;
+            display: none;
+            z-index: 20;
+            max-width: 300px;
+            white-space: pre-wrap;
+            box-shadow: 2px 2px 0px #000;
+        }
+        #tooltip strong {
+            color: #fff;
+            display: block;
+            margin-bottom: 5px;
+            border-bottom: 1px dashed #0f0;
         }
     </style>
 </head>
 <body>
     <div id="game-container">
         <canvas id="gameCanvas"></canvas>
+        <div id="tooltip"></div>
     </div>
 
     <script>
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
+        const tooltip = document.getElementById('tooltip');
 
-        // Game Constants
-        const FRICTION = 0.95;
-        const MIN_VELOCITY = 0.2;
-        const RADIUS = 18;
-        const MAX_DRAG = 200;
-        const CHAR_SIZE = 20;
-
-        // Colors
-        const COLOR_VIRUS = '#0f0';
-        const COLOR_ENEMY = '#f00';
-        const COLOR_SHIELD = '#0ff';
-        const COLOR_AURA = 'rgba(0, 255, 0, 0.2)';
-        const COLOR_DANGER = 'rgba(255, 0, 0, 0.2)';
-        const COLOR_POWERUP = '#ff0';
+        // Physics & Game Constants
+        const FRICTION = 0.94;
+        const MIN_VELOCITY = 0.15;
+        const RADIUS = 16;
+        const CHAR_SIZE = 18;
+        const MAX_DRAG = 250;
+        const LAUNCH_POWER = 0.12;
 
         // State Variables
-        let width, height;
+        let width, height, cx, cy;
         let mapPolygon = [];
-        let mapCenter = { x: 0, y: 0 };
-        let gameState = 'START'; // START, PLAYER_AIM, PLAYER_DRAG, MOVING, ENEMY_TURN, GAME_OVER, NEXT_LEVEL
+        let gameState = 'START'; // START, PLAYER_TURN, PLAYER_DRAG, MOVING, ENEMY_TURN, GAME_OVER, NEXT_LEVEL
         let currentLevel = 1;
         
         let entities = [];
         let particles = [];
-        let powerups = [];
-        let deadParticles = []; // Permanent ASCII specs on the map
+        let deadParticles = []; // Permanent red ASCII specs
         let magmaGrid = [];
+        let powerups = [];
         
         let player = null;
         let enemyQueue = [];
@@ -93,49 +106,297 @@
         let mouse = { x: 0, y: 0 };
         let dragStart = { x: 0, y: 0 };
         let hoveredEntity = null;
+        let globalTick = 0;
+
+        const ENEMY_DEFS = {
+            'E': { cost: 1, desc: "Básico. 1 lanzamiento. Potencia normal.", power: 1.0, moves: 1 },
+            'R': { cost: 2, desc: "Fuerte. 1 lanzamiento. Mayor potencia.", power: 1.6, moves: 1 },
+            'O': { cost: 3, desc: "Escudo. Anula el primer empuje recibido.", power: 1.0, moves: 1, shield: true },
+            'X': { cost: 2, desc: "Explosivo. Explota si estás cerca al detenerse.", power: 1.0, moves: 1, radius: 120 },
+            'Y': { cost: 3, desc: "Divisor. Se divide en dos { I } al ser golpeado.", power: 1.0, moves: 1 },
+            'I': { cost: 0, desc: "Fragmento. Débil. Potencia baja.", power: 0.5, moves: 1 },
+            'H': { cost: 3, desc: "Protector. Inmuniza aliados en su rango verde.", power: 1.0, moves: 1, aura: 150 },
+            'U': { cost: 3, desc: "Soporte. Da escudos a aliados en rango al detenerse.", power: 1.0, moves: 1, aura: 150 },
+            '10':{ cost: 5, desc: "Tanque. Inmune a empuje hasta reducir su número a 1.", power: 1.0, moves: 1, hp: 10 },
+            'S': { cost: 3, desc: "Serpiente. Movimiento curvo. Atraviesa enemigos.", power: 1.4, moves: 1, isSnake: true }
+        };
+
+        const POWERUP_DEFS = {
+            '*': { name: "Overdrive", desc: "No rebotas al chocar. Atraviesas enemigos y los empujas." },
+            'x': { name: "Bomba", desc: "Aura roja. Al detenerte, empuja enemigos fuera del rango." },
+            '^': { name: "Doble Turno", desc: "Permite tener dos lanzamientos este turno." },
+            'o': { name: "Escudo", desc: "Inmune a empujes enemigos durante su turno." }
+        };
 
         function resize() {
             width = canvas.width = window.innerWidth;
             height = canvas.height = window.innerHeight;
-            mapCenter = { x: width / 2, y: height / 2 };
+            cx = width / 2;
+            cy = height / 2;
             ctx.textBaseline = 'middle';
             ctx.textAlign = 'center';
             if (gameState === 'START') generateMapAndMagma();
         }
         window.addEventListener('resize', resize);
 
-        // Input
-        window.addEventListener('mousedown', (e) => {
+        function generateMapAndMagma() {
+            mapPolygon = [];
+            let points = 14;
+            let baseRadius = Math.min(width, height) * 0.35;
+            
+            // Generate a jagged polygon
+            for (let i = 0; i < points; i++) {
+                let angle = (i / points) * Math.PI * 2;
+                // Deform to make it somewhat square/irregular
+                let mod = Math.abs(Math.cos(angle * 2)) * 0.4 + 0.6;
+                let r = baseRadius * mod + (Math.random() * 80 - 40); 
+                mapPolygon.push({ x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r });
+            }
+
+            // Magma Grid
+            magmaGrid = [];
+            let cols = Math.ceil(width / (CHAR_SIZE * 1.5));
+            let rows = Math.ceil(height / (CHAR_SIZE * 1.5));
+            let chars = "01#$%&@*+/\\~";
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    magmaGrid.push({
+                        x: c * (CHAR_SIZE * 1.5),
+                        y: r * (CHAR_SIZE * 1.5),
+                        char: chars[Math.floor(Math.random() * chars.length)],
+                        offset: Math.random() * 100
+                    });
+                }
+            }
+        }
+
+        function isPointInPoly(pt) {
+            let inside = false;
+            for (let i = 0, j = mapPolygon.length - 1; i < mapPolygon.length; j = i++) {
+                let xi = mapPolygon[i].x, yi = mapPolygon[i].y;
+                let xj = mapPolygon[j].x, yj = mapPolygon[j].y;
+                let intersect = ((yi > pt.y) != (yj > pt.y)) && (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        function getRandomInsidePos(margin = RADIUS) {
+            let pos, valid = false;
+            let boundsR = Math.min(width, height) * 0.4;
+            let limit = 0;
+            while (!valid && limit < 200) {
+                pos = {
+                    x: cx + (Math.random() * boundsR * 2 - boundsR),
+                    y: cy + (Math.random() * boundsR * 2 - boundsR)
+                };
+                if (isPointInPoly(pos)) {
+                    valid = true;
+                    // Check entity overlap
+                    for (let e of entities) {
+                        if (Math.hypot(e.x - pos.x, e.y - pos.y) < RADIUS * 2.5) valid = false;
+                    }
+                    for (let p of powerups) {
+                        if (Math.hypot(p.x - pos.x, p.y - pos.y) < RADIUS * 2.5) valid = false;
+                    }
+                }
+                limit++;
+            }
+            return pos || {x: cx, y: cy};
+        }
+
+        class Entity {
+            constructor(x, y, type, isPlayer = false) {
+                this.x = x; this.y = y;
+                this.vx = 0; this.vy = 0;
+                this.type = type;
+                this.isPlayer = isPlayer;
+                this.r = RADIUS;
+                this.dead = false;
+                
+                this.movesLeft = 1;
+                this.tick = 0; // For sine wave S enemy
+                
+                // Player Buffs
+                this.hasOverdrive = false;
+                this.hasBomb = false;
+                this.bombRadius = 130;
+                this.hasShield = false;
+                
+                if (!isPlayer && type) {
+                    let def = ENEMY_DEFS[type];
+                    this.power = def.power || 1;
+                    this.movesLeft = def.moves || 1;
+                    this.maxMoves = def.moves || 1;
+                    this.hasShield = def.shield || false;
+                    this.auraRadius = def.aura || 0;
+                    this.dangerRadius = def.radius || 0;
+                    this.hp = def.hp || 1;
+                    this.isSnake = def.isSnake || false;
+                }
+            }
+            
+            isMoving() {
+                return Math.abs(this.vx) > MIN_VELOCITY || Math.abs(this.vy) > MIN_VELOCITY;
+            }
+
+            draw() {
+                ctx.save();
+                
+                // Draw Auras
+                if (this.auraRadius > 0) {
+                    ctx.beginPath(); ctx.arc(this.x, this.y, this.auraRadius, 0, Math.PI*2);
+                    ctx.fillStyle = 'rgba(0, 255, 0, 0.15)'; ctx.fill();
+                    ctx.strokeStyle = '#0f0'; ctx.setLineDash([4, 4]); ctx.stroke();
+                }
+                if (this.dangerRadius > 0) {
+                    ctx.beginPath(); ctx.arc(this.x, this.y, this.dangerRadius, 0, Math.PI*2);
+                    ctx.fillStyle = 'rgba(255, 0, 0, 0.15)'; ctx.fill();
+                    ctx.strokeStyle = '#f00'; ctx.setLineDash([4, 4]); ctx.stroke();
+                }
+                if (this.isPlayer && this.hasBomb) {
+                    ctx.beginPath(); ctx.arc(this.x, this.y, this.bombRadius, 0, Math.PI*2);
+                    ctx.fillStyle = 'rgba(255, 0, 0, 0.15)'; ctx.fill();
+                    ctx.strokeStyle = '#f00'; ctx.setLineDash([4, 4]); ctx.stroke();
+                }
+
+                ctx.setLineDash([]);
+                ctx.font = `bold ${CHAR_SIZE}px 'Courier New', monospace`;
+                
+                if (this.isPlayer) {
+                    ctx.fillStyle = '#0ff';
+                    let txt = this.hasShield ? '[@]' : ' @ ';
+                    ctx.fillText(txt, this.x, this.y);
+                    if (this.hasOverdrive) {
+                        ctx.strokeStyle = '#ff0'; ctx.beginPath(); ctx.arc(this.x, this.y, this.r + 3, 0, Math.PI*2); ctx.stroke();
+                    }
+                } else {
+                    ctx.fillStyle = '#f00';
+                    let dispType = this.type;
+                    if (this.type === '10') dispType = this.hp;
+                    let txt = this.hasShield ? `(${dispType})` : `{ ${dispType} }`;
+                    ctx.fillText(txt, this.x, this.y);
+                }
+                ctx.restore();
+            }
+        }
+
+        class Powerup {
+            constructor(x, y, type) {
+                this.x = x; this.y = y; this.type = type; this.r = RADIUS - 4;
+            }
+            draw() {
+                ctx.fillStyle = '#ff0';
+                let size = CHAR_SIZE + Math.sin(globalTick * 0.1) * 3;
+                ctx.font = `bold ${size}px 'Courier New', monospace`;
+                ctx.fillText(this.type, this.x, this.y);
+            }
+        }
+
+        function initLevel(resetScore = false) {
+            if (resetScore) currentLevel = 1;
+            
+            entities = [];
+            powerups = [];
+            deadParticles = []; // Clear floor particles on new level
+            
+            player = new Entity(cx, cy + 40, null, true);
+            entities.push(player);
+
+            let diffTarget = 1 + (currentLevel - 1) * 2;
+            let currentDiff = 0;
+            
+            // Filter out 'I' (only spawns from Y)
+            let spawnable = Object.keys(ENEMY_DEFS).filter(k => k !== 'I');
+            
+            // Randomly pick enemies until diff is met
+            let limit = 0;
+            while (currentDiff < diffTarget && limit < 100) {
+                let cType = spawnable[Math.floor(Math.random() * spawnable.length)];
+                let def = ENEMY_DEFS[cType];
+                
+                // Extra conditions for H and U
+                if (cType === 'H' || cType === 'U') {
+                    if (currentDiff === 0) continue; // Only spawn if there are other enemies
+                }
+
+                if (currentDiff + def.cost <= diffTarget + 1) {
+                    let pos = getRandomInsidePos();
+                    entities.push(new Entity(pos.x, pos.y, cType));
+                    currentDiff += def.cost;
+                }
+                limit++;
+            }
+            
+            // Add remaining diff with basic enemies if needed
+            while(currentDiff < diffTarget) {
+                let pos = getRandomInsidePos();
+                entities.push(new Entity(pos.x, pos.y, 'E'));
+                currentDiff += ENEMY_DEFS['E'].cost;
+            }
+
+            // Move entities into auras if H or U exist
+            let auraE = entities.filter(e => !e.isPlayer && (e.type === 'H' || e.type === 'U'));
+            if (auraE.length > 0) {
+                entities.forEach(e => {
+                    if (!e.isPlayer && e.type !== 'H' && e.type !== 'U') {
+                        let center = auraE[Math.floor(Math.random()*auraE.length)];
+                        // Move closer to center
+                        if (Math.random() > 0.3) {
+                            let a = Math.random() * Math.PI * 2;
+                            let dist = Math.random() * (center.auraRadius - RADIUS);
+                            e.x = center.x + Math.cos(a)*dist;
+                            e.y = center.y + Math.sin(a)*dist;
+                        }
+                    }
+                });
+            }
+
+            // Spawn powerups
+            let pCount = Math.min(4, Math.floor(currentLevel / 2) + 1);
+            let pKeys = Object.keys(POWERUP_DEFS);
+            for(let i = 0; i < pCount; i++) {
+                let pos = getRandomInsidePos();
+                powerups.push(new Powerup(pos.x, pos.y, pKeys[Math.floor(Math.random() * pKeys.length)]));
+            }
+
+            gameState = 'PLAYER_TURN';
+            activeEnemy = null;
+        }
+
+        function getEventPos(e) {
+            if (e.touches && e.touches.length > 0) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            return { x: e.clientX, y: e.clientY };
+        }
+
+        function handleDown(e) {
             if (gameState === 'START' || gameState === 'NEXT_LEVEL' || gameState === 'GAME_OVER') {
                 initLevel(gameState === 'GAME_OVER');
                 return;
             }
-
-            if (gameState === 'PLAYER_AIM' && player) {
-                let dist = Math.hypot(player.x - mouse.x, player.y - mouse.y);
-                if (dist < RADIUS * 2) {
+            if (gameState === 'PLAYER_TURN' && player) {
+                let pos = getEventPos(e);
+                if (Math.hypot(player.x - pos.x, player.y - pos.y) < RADIUS * 2.5) {
                     gameState = 'PLAYER_DRAG';
                     dragStart = { x: player.x, y: player.y };
                 }
             }
-        });
+        }
 
-        window.addEventListener('mousemove', (e) => {
-            mouse.x = e.clientX;
-            mouse.y = e.clientY;
+        function handleMove(e) {
+            let pos = getEventPos(e);
+            mouse.x = pos.x; mouse.y = pos.y;
 
-            // Check hover for tooltips
             hoveredEntity = null;
-            let allObjs = [...entities, ...powerups];
-            for (let obj of allObjs) {
+            let all = [...entities, ...powerups];
+            for (let obj of all) {
                 if (Math.hypot(obj.x - mouse.x, obj.y - mouse.y) < RADIUS * 1.5) {
-                    hoveredEntity = obj;
-                    break;
+                    hoveredEntity = obj; break;
                 }
             }
-        });
+        }
 
-        window.addEventListener('mouseup', (e) => {
+        function handleUp(e) {
             if (gameState === 'PLAYER_DRAG' && player) {
                 let dx = dragStart.x - mouse.x;
                 let dy = dragStart.y - mouse.y;
@@ -147,713 +408,452 @@
                         dy = (dy / dist) * MAX_DRAG;
                     }
                     
-                    let power = 0.15;
-                    player.vx = dx * power;
-                    player.vy = dy * power;
-                    
+                    player.vx = dx * LAUNCH_POWER;
+                    player.vy = dy * LAUNCH_POWER;
                     player.movesLeft--;
                     gameState = 'MOVING';
                 } else {
-                    gameState = 'PLAYER_AIM';
-                }
-            }
-        });
-
-        // Touch support mapping to mouse events
-        window.addEventListener('touchstart', e => { mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY; window.dispatchEvent(new MouseEvent('mousedown')); }, {passive: false});
-        window.addEventListener('touchmove', e => { mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY; window.dispatchEvent(new MouseEvent('mousemove')); }, {passive: false});
-        window.addEventListener('touchend', e => { window.dispatchEvent(new MouseEvent('mouseup')); }, {passive: false});
-
-        const ENEMY_TYPES = {
-            'E': { cost: 1, desc: "Básico. 1 movimiento.", power: 10, moves: 1, symbol: 'E' },
-            'R': { cost: 2, desc: "Fuerte. Gran potencia de empuje.", power: 18, moves: 1, symbol: 'R' },
-            'O': { cost: 3, desc: "Escudo. Anula el primer impacto recibido.", power: 10, moves: 1, symbol: 'O' },
-            'X': { cost: 2, desc: "Explosivo. Explota al detenerse si estás cerca.", power: 10, moves: 1, symbol: 'X' },
-            'K': { cost: 3, desc: "Ágil. 2 lanzamientos por turno.", power: 10, moves: 2, symbol: 'K' },
-            'Y': { cost: 3, desc: "Divisor. Al caer fuera, crea dos { I }.", power: 10, moves: 1, symbol: 'Y' },
-            'I': { cost: 0, desc: "Débil. Creado por { Y }.", power: 5, moves: 1, symbol: 'I' },
-            'H': { cost: 3, desc: "Soporte. Inmuniza aliados cercanos a empujes.", power: 8, moves: 1, symbol: 'H' }
-        };
-
-        const POWERUP_TYPES = [
-            { type: 'OVERDRIVE', symbol: '^', desc: "Overdrive: El virus atraviesa enemigos sin rebotar al atacar." },
-            { type: 'BOMBA', symbol: '$', desc: "Bomba: Expande una onda roja al detenerte, empujando enemigos." },
-            { type: 'DOBLE', symbol: '+', desc: "Doble Turno: Permite realizar 2 lanzamientos este turno." },
-            { type: 'ESCUDO', symbol: '*', desc: "Escudo: Inmune a empujes durante el turno enemigo." }
-        ];
-
-        class Entity {
-            constructor(x, y, isPlayer, eType = null) {
-                this.x = x;
-                this.y = y;
-                this.vx = 0;
-                this.vy = 0;
-                this.r = RADIUS;
-                this.isPlayer = isPlayer;
-                
-                this.markedForDeath = false;
-                
-                // Player specific
-                this.piercing = false;
-                this.hasBomba = false;
-                this.bombaRadius = 120;
-                this.playerShield = false;
-                this.movesLeft = 1;
-
-                // Enemy specific
-                this.eType = eType;
-                if (!isPlayer && eType) {
-                    let def = ENEMY_TYPES[eType];
-                    this.symbol = def.symbol;
-                    this.power = def.power;
-                    this.maxMoves = def.moves;
-                    this.movesLeft = def.moves;
-                    this.hasShield = (eType === 'O');
-                    this.auraRadius = (eType === 'H') ? 150 : 0;
-                    this.dangerRadius = (eType === 'X') ? 100 : 0;
-                } else {
-                    this.symbol = 'V';
-                }
-            }
-
-            isMoving() {
-                return Math.abs(this.vx) > MIN_VELOCITY || Math.abs(this.vy) > MIN_VELOCITY;
-            }
-
-            draw() {
-                ctx.save();
-                
-                // Draw Auras / Ranges
-                if (this.eType === 'H') {
-                    ctx.beginPath(); ctx.arc(this.x, this.y, this.auraRadius, 0, Math.PI*2);
-                    ctx.fillStyle = COLOR_AURA; ctx.fill();
-                    ctx.strokeStyle = '#0f0'; ctx.setLineDash([5, 5]); ctx.stroke();
-                }
-                if (this.eType === 'X') {
-                    ctx.beginPath(); ctx.arc(this.x, this.y, this.dangerRadius, 0, Math.PI*2);
-                    ctx.fillStyle = COLOR_DANGER; ctx.fill();
-                    ctx.strokeStyle = '#f00'; ctx.setLineDash([5, 5]); ctx.stroke();
-                }
-                if (this.isPlayer && this.hasBomba) {
-                    ctx.beginPath(); ctx.arc(this.x, this.y, this.bombaRadius, 0, Math.PI*2);
-                    ctx.fillStyle = COLOR_DANGER; ctx.fill();
-                    ctx.strokeStyle = '#f00'; ctx.setLineDash([10, 5]); ctx.stroke();
-                }
-
-                ctx.setLineDash([]);
-                
-                // Draw Character
-                ctx.font = `bold ${CHAR_SIZE}px 'Courier New', monospace`;
-                if (this.isPlayer) {
-                    ctx.fillStyle = COLOR_VIRUS;
-                    let disp = this.playerShield ? '[V]' : ' V ';
-                    ctx.fillText(disp, this.x, this.y);
-                } else {
-                    ctx.fillStyle = COLOR_ENEMY;
-                    let disp = this.hasShield ? `(${this.symbol})` : `{ ${this.symbol} }`;
-                    ctx.fillText(disp, this.x, this.y);
-                }
-
-                // Draw Overdrive effect
-                if (this.isPlayer && this.piercing) {
-                    ctx.strokeStyle = '#ff0'; ctx.beginPath(); ctx.arc(this.x, this.y, this.r + 4, 0, Math.PI*2); ctx.stroke();
-                }
-
-                ctx.restore();
-            }
-        }
-
-        class Powerup {
-            constructor(x, y, def) {
-                this.x = x;
-                this.y = y;
-                this.r = 12;
-                this.def = def;
-                this.symbol = def.symbol;
-            }
-            draw() {
-                ctx.fillStyle = COLOR_POWERUP;
-                ctx.font = `bold ${CHAR_SIZE}px 'Courier New', monospace`;
-                // Pulsing
-                let size = CHAR_SIZE + Math.sin(Date.now() / 150) * 4;
-                ctx.font = `bold ${size}px 'Courier New', monospace`;
-                ctx.fillText(this.symbol, this.x, this.y);
-            }
-        }
-
-        function generateMapAndMagma() {
-            // Generate Map Polygon
-            mapPolygon = [];
-            let points = 12;
-            let baseRadius = Math.min(width, height) * 0.35;
-            for (let i = 0; i < points; i++) {
-                let angle = (i / points) * Math.PI * 2;
-                let r = baseRadius + (Math.random() * 100 - 50); // Jaggedness
-                
-                // Make it roughly square-ish by pushing corners out
-                let mod = Math.abs(Math.cos(angle * 2)) * 0.3 + 0.7;
-                r *= mod;
-
-                mapPolygon.push({
-                    x: mapCenter.x + Math.cos(angle) * r,
-                    y: mapCenter.y + Math.sin(angle) * r
-                });
-            }
-
-            // Setup Magma Grid outside polygon
-            magmaGrid = [];
-            let cols = Math.ceil(width / CHAR_SIZE);
-            let rows = Math.ceil(height / CHAR_SIZE);
-            let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*";
-
-            for (let r = 0; r < rows; r++) {
-                for (let c = 0; c < cols; c++) {
-                    let px = c * CHAR_SIZE + CHAR_SIZE/2;
-                    let py = r * CHAR_SIZE + CHAR_SIZE/2;
-                    if (!isPointInPoly(mapPolygon, px, py)) {
-                        magmaGrid.push({
-                            x: px, y: py,
-                            char: chars[Math.floor(Math.random() * chars.length)],
-                            timer: Math.random() * 100
-                        });
-                    }
+                    gameState = 'PLAYER_TURN';
                 }
             }
         }
 
-        function isPointInPoly(polygon, x, y) {
-            let inside = false;
-            for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-                let xi = polygon[i].x, yi = polygon[i].y;
-                let xj = polygon[j].x, yj = polygon[j].y;
-                let intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-                if (intersect) inside = !inside;
-            }
-            return inside;
-        }
+        window.addEventListener('mousedown', handleDown);
+        window.addEventListener('mousemove', handleMove);
+        window.addEventListener('mouseup', handleUp);
+        window.addEventListener('touchstart', handleDown, {passive: false});
+        window.addEventListener('touchmove', handleMove, {passive: false});
+        window.addEventListener('touchend', handleUp, {passive: false});
 
-        function spawnParticlesAtEdge(x, y) {
-            // Drop some dead characters near the edge where they fell
-            let chars = "0101#@%";
-            for(let i=0; i<5; i++) {
-                deadParticles.push({
-                    x: x + (Math.random() * 20 - 10),
-                    y: y + (Math.random() * 20 - 10),
-                    char: chars[Math.floor(Math.random()*chars.length)]
-                });
-            }
-        }
-
-        function initLevel(resetAll = false) {
-            if (resetAll) currentLevel = 1;
-            
-            entities = [];
-            powerups = [];
-            deadParticles = [];
-            
-            // Spawn Player
-            player = new Entity(mapCenter.x, mapCenter.y + 50, true);
-            entities.push(player);
-
-            // Calculate Budget and Spawn Enemies
-            let budget = (currentLevel * 2) - 1;
-            let availableKeys = Object.keys(ENEMY_TYPES).filter(k => k !== 'I'); // 'I' doesn't spawn naturally
-            
-            let spawnAttempts = 0;
-            while (budget > 0 && spawnAttempts < 50) {
-                let key = availableKeys[Math.floor(Math.random() * availableKeys.length)];
-                let def = ENEMY_TYPES[key];
-                
-                if (def.cost <= budget) {
-                    budget -= def.cost;
-                    spawnEntityRandomly(false, key);
-                }
-                spawnAttempts++;
-            }
-            
-            // Fill remaining budget with 'E' if any left and possible
-            while(budget >= ENEMY_TYPES['E'].cost) {
-                spawnEntityRandomly(false, 'E');
-                budget -= ENEMY_TYPES['E'].cost;
-            }
-
-            // Spawn Powerups
-            let pCount = Math.min(4, Math.floor(currentLevel / 2) + 1); // Up to 4
-            for(let i=0; i<pCount; i++) {
-                let def = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
-                let pos = getRandomInsidePos();
-                powerups.push(new Powerup(pos.x, pos.y, def));
-            }
-
-            gameState = 'PLAYER_AIM';
-            player.movesLeft = 1;
-            player.piercing = false;
-            player.hasBomba = false;
-            player.playerShield = false;
-        }
-
-        function getRandomInsidePos() {
-            let pos;
-            let valid = false;
-            let boundsRadius = Math.min(width, height) * 0.25;
-            while(!valid) {
-                pos = {
-                    x: mapCenter.x + (Math.random() * boundsRadius * 2 - boundsRadius),
-                    y: mapCenter.y + (Math.random() * boundsRadius * 2 - boundsRadius)
-                };
-                if (isPointInPoly(mapPolygon, pos.x, pos.y)) valid = true;
-            }
-            return pos;
-        }
-
-        function spawnEntityRandomly(isPlayer, type = null) {
-            let pos = getRandomInsidePos();
-            // Ensure no overlap with existing
-            let overlap = true;
-            while(overlap) {
-                overlap = false;
-                for(let e of entities) {
-                    if (Math.hypot(e.x - pos.x, e.y - pos.y) < RADIUS * 3) {
-                        pos = getRandomInsidePos();
-                        overlap = true;
-                        break;
-                    }
-                }
-            }
-            entities.push(new Entity(pos.x, pos.y, isPlayer, type));
-        }
-
-        function checkCollisions() {
-            for (let i = 0; i < entities.length; i++) {
-                for (let j = i + 1; j < entities.length; j++) {
-                    let a = entities[i];
-                    let b = entities[j];
-
-                    if (a.markedForDeath || b.markedForDeath) continue;
-
-                    let dx = b.x - a.x;
-                    let dy = b.y - a.y;
-                    let dist = Math.hypot(dx, dy);
-                    let minDist = a.r + b.r;
-
-                    if (dist < minDist) {
-                        // Separate them
-                        let overlap = minDist - dist;
-                        let nx = dx / dist, ny = dy / dist;
-                        a.x -= nx * (overlap / 2.1);
-                        a.y -= ny * (overlap / 2.1);
-                        b.x += nx * (overlap / 2.1);
-                        b.y += ny * (overlap / 2.1);
-
-                        // Identify attacker and defender based on speed
-                        let speedA = Math.hypot(a.vx, a.vy);
-                        let speedB = Math.hypot(b.vx, b.vy);
-                        
-                        if (speedA < 0.5 && speedB < 0.5) continue; // Just touching
-
-                        let attacker = speedA > speedB ? a : b;
-                        let defender = speedA > speedB ? b : a;
-
-                        resolveHit(attacker, defender, nx, ny);
-                    }
-                }
-            }
-        }
-
-        function isProtectedByH(entity) {
-            if (entity.isPlayer || entity.eType === 'H') return false;
+        function isProtectedByAura(entity) {
+            if (entity.isPlayer || entity.type === 'H' || entity.type === 'U') return false;
             for (let e of entities) {
-                if (e.eType === 'H' && !e.markedForDeath && Math.hypot(e.x - entity.x, e.y - entity.y) <= e.auraRadius) {
+                if (e.type === 'H' && !e.dead && Math.hypot(e.x - entity.x, e.y - entity.y) <= e.auraRadius) {
                     return true;
                 }
             }
             return false;
         }
 
-        function resolveHit(attacker, defender, nx, ny) {
-            // Determine base knockback based on attacker speed
-            let impactSpeed = Math.hypot(attacker.vx, attacker.vy);
-            
-            // Modifier flags
-            let defenderImmune = false;
-            
-            if (defender.isPlayer && defender.playerShield && gameState !== 'MOVING' && gameState !== 'PLAYER_AIM') {
-                defenderImmune = true; // Shield powerup during enemy turn
-            } else if (!defender.isPlayer && defender.hasShield) {
-                defenderImmune = true;
-                defender.hasShield = false; // Break shield
-            } else if (!defender.isPlayer && isProtectedByH(defender)) {
-                // H aura protects from pushes EXCEPT if hit by Player
-                if (!attacker.isPlayer) defenderImmune = true;
+        function spawnParticles(x, y, type, count, colors) {
+            for(let i=0; i<count; i++) {
+                particles.push({
+                    x: x, y: y,
+                    vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8,
+                    life: 1.0, decay: Math.random() * 0.05 + 0.02,
+                    char: "01$*@#%"[Math.floor(Math.random()*7)],
+                    color: colors[Math.floor(Math.random()*colors.length)]
+                });
             }
-
-            // Overdrive Check
-            let piercingHit = (attacker.isPlayer && attacker.piercing);
-
-            // Apply push to defender
-            if (!defenderImmune) {
-                let pushFactor = (attacker.isPlayer || defender.isPlayer) ? 0.5 : 0.5; // Elasticity
-                
-                // If it's the player hitting an enemy, apply push
-                // If it's enemy hitting enemy, apply push
-                let vVec = { x: attacker.vx, y: attacker.vy };
-                
-                defender.vx += vVec.x * pushFactor;
-                defender.vy += vVec.y * pushFactor;
-            }
-
-            // Rebound attacker
-            if (!piercingHit) {
-                attacker.vx *= -0.2;
-                attacker.vy *= -0.2;
-            } else {
-                // If piercing, attacker maintains most velocity
-                attacker.vx *= 0.9;
-                attacker.vy *= 0.9;
+        }
+        
+        function leaveDeadCorpse(x, y) {
+            for(let i=0; i<4; i++) {
+                deadParticles.push({
+                    x: x + (Math.random() * 20 - 10),
+                    y: y + (Math.random() * 20 - 10),
+                    char: "xX*#"[Math.floor(Math.random()*4)]
+                });
             }
         }
 
-        function checkPowerupCollections() {
-            if (gameState === 'GAME_OVER' || gameState === 'NEXT_LEVEL') return;
-            for (let i = powerups.length - 1; i >= 0; i--) {
-                let p = powerups[i];
-                if (Math.hypot(player.x - p.x, player.y - p.y) < player.r + p.r) {
-                    // Apply
-                    if (p.def.type === 'OVERDRIVE') player.piercing = true;
-                    if (p.def.type === 'BOMBA') player.hasBomba = true;
-                    if (p.def.type === 'DOBLE') player.movesLeft += 1;
-                    if (p.def.type === 'ESCUDO') player.playerShield = true;
-                    
-                    powerups.splice(i, 1);
+        function handleCollisions() {
+            for (let i = 0; i < entities.length; i++) {
+                for (let j = i + 1; j < entities.length; j++) {
+                    let a = entities[i]; let b = entities[j];
+                    if (a.dead || b.dead) continue;
+
+                    // Specific check for S: only collides with Player
+                    if (a.isSnake && !b.isPlayer) continue;
+                    if (b.isSnake && !a.isPlayer) continue;
+
+                    let dx = b.x - a.x; let dy = b.y - a.y;
+                    let dist = Math.hypot(dx, dy);
+                    let minDist = a.r + b.r;
+
+                    if (dist < minDist) {
+                        let overlap = minDist - dist;
+                        let nx = dx / dist, ny = dy / dist;
+                        
+                        // Positional resolution (separate them)
+                        a.x -= nx * (overlap / 2.1); a.y -= ny * (overlap / 2.1);
+                        b.x += nx * (overlap / 2.1); b.y += ny * (overlap / 2.1);
+
+                        let speedA = Math.hypot(a.vx, a.vy);
+                        let speedB = Math.hypot(b.vx, b.vy);
+                        if (speedA < 1.0 && speedB < 1.0) continue; 
+
+                        let atk = speedA > speedB ? a : b;
+                        let def = speedA > speedB ? b : a;
+
+                        applyHit(atk, def);
+                    }
                 }
             }
         }
 
-        function triggerEndEffects(entity) {
-            // Bomba
-            if (entity.isPlayer && entity.hasBomba) {
+        function applyHit(atk, def) {
+            let isPlayerTurn = (gameState === 'MOVING' && activeEnemy === null);
+            let defImmune = false;
+
+            // Damage / Special Logic
+            if (def.isPlayer && def.hasShield && !isPlayerTurn) {
+                defImmune = true; 
+            } else if (!def.isPlayer && def.type === '10' && def.hp > 1) {
+                def.hp--;
+                defImmune = true;
+                spawnParticles(def.x, def.y, 'hit', 3, ['#aaa', '#fff']);
+            } else if (!def.isPlayer && def.hasShield) {
+                defImmune = true;
+                def.hasShield = false;
+                spawnParticles(def.x, def.y, 'hit', 5, ['#0ff']);
+            } else if (!def.isPlayer && isProtectedByAura(def)) {
+                if (!atk.isPlayer) defImmune = true; 
+            }
+
+            // Splitting Y
+            if (!def.isPlayer && def.type === 'Y') {
+                def.dead = true;
+                for(let i=0; i<2; i++) {
+                    let nE = new Entity(def.x + (i===0?-10:10), def.y, 'I');
+                    nE.vx = (Math.random()-0.5)*5; nE.vy = (Math.random()-0.5)*5;
+                    entities.push(nE);
+                }
+            }
+
+            let piercing = (atk.isPlayer && atk.hasOverdrive);
+
+            // Push Defender
+            if (!defImmune) {
+                let factor = 0.5; // Always push at 50%
+                def.vx += atk.vx * factor;
+                def.vy += atk.vy * factor;
+            }
+
+            // Recoil Attacker
+            if (!piercing) {
+                atk.vx *= -0.3;
+                atk.vy *= -0.3;
+            } else {
+                atk.vx *= 0.9;
+                atk.vy *= 0.9;
+            }
+        }
+
+        function evaluateStops() {
+            // Check Bomba
+            if (player.hasBomb) {
+                let hitAny = false;
                 entities.forEach(e => {
-                    if (!e.isPlayer && !e.markedForDeath) {
-                        let dist = Math.hypot(e.x - entity.x, e.y - entity.y);
-                        if (dist <= entity.bombaRadius) {
-                            let angle = Math.atan2(e.y - entity.y, e.x - entity.x);
-                            let force = 25;
-                            e.vx += Math.cos(angle) * force;
-                            e.vy += Math.sin(angle) * force;
-                        }
+                    if (!e.isPlayer && !e.dead && Math.hypot(e.x - player.x, e.y - player.y) <= player.bombRadius) {
+                        let angle = Math.atan2(e.y - player.y, e.x - player.x);
+                        e.vx += Math.cos(angle) * 18;
+                        e.vy += Math.sin(angle) * 18;
+                        hitAny = true;
                     }
                 });
-                entity.hasBomba = false;
+                player.hasBomb = false;
+                if(hitAny) return true; // Movement continues
             }
 
-            // X Explosion
-            if (!entity.isPlayer && entity.eType === 'X') {
-                let dist = Math.hypot(player.x - entity.x, player.y - entity.y);
-                if (dist <= entity.dangerRadius) {
-                    let angle = Math.atan2(player.y - entity.y, player.x - entity.x);
-                    player.vx += Math.cos(angle) * 30; // Huge push
-                    player.vy += Math.sin(angle) * 30;
-                    entity.markedForDeath = true; // Destroy self
+            // Check X explosions
+            let exploded = false;
+            entities.forEach(e => {
+                if (!e.isPlayer && e.type === 'X' && !e.dead) {
+                    if (Math.hypot(player.x - e.x, player.y - e.y) <= e.dangerRadius) {
+                        let angle = Math.atan2(player.y - e.y, player.x - e.x);
+                        player.vx += Math.cos(angle) * 25; // Big push
+                        player.vy += Math.sin(angle) * 25;
+                        e.dead = true;
+                        spawnParticles(e.x, e.y, 'exp', 20, ['#f00', '#ff0']);
+                        exploded = true;
+                    }
                 }
-            }
+            });
+            if (exploded) return true;
+
+            // Check U shields
+            entities.forEach(e => {
+                if (!e.isPlayer && e.type === 'U' && !e.dead) {
+                    entities.forEach(t => {
+                        if (!t.isPlayer && t.type !== 'H' && t.type !== 'U' && !t.dead) {
+                            if (Math.hypot(t.x - e.x, t.y - e.y) <= e.auraRadius) {
+                                t.hasShield = true;
+                            }
+                        }
+                    });
+                }
+            });
+
+            return false;
         }
 
         function manageTurns() {
             if (gameState === 'START' || gameState === 'GAME_OVER' || gameState === 'NEXT_LEVEL') return;
 
-            // Apply Physics
+            // Movement & Physics
+            let movingCount = 0;
             entities.forEach(e => {
-                if (!e.markedForDeath) {
-                    e.x += e.vx;
-                    e.y += e.vy;
-                    e.vx *= FRICTION;
-                    e.vy *= FRICTION;
-                    if (Math.abs(e.vx) < MIN_VELOCITY) e.vx = 0;
-                    if (Math.abs(e.vy) < MIN_VELOCITY) e.vy = 0;
+                if (e.dead) return;
+
+                // S type snake movement
+                if (e.isSnake && e.isMoving()) {
+                    e.tick++;
+                    let dir = Math.atan2(e.vy, e.vx);
+                    let latDir = dir + Math.PI/2;
+                    let waveForce = Math.sin(e.tick * 0.2) * 5;
+                    e.x += Math.cos(latDir) * waveForce;
+                    e.y += Math.sin(latDir) * waveForce;
+                }
+
+                e.x += e.vx; e.y += e.vy;
+                e.vx *= FRICTION; e.vy *= FRICTION;
+                
+                if (Math.abs(e.vx) < MIN_VELOCITY) e.vx = 0;
+                if (Math.abs(e.vy) < MIN_VELOCITY) e.vy = 0;
+                
+                if (e.isMoving()) movingCount++;
+            });
+
+            handleCollisions();
+
+            // Collect Powerups
+            for (let i = powerups.length - 1; i >= 0; i--) {
+                let p = powerups[i];
+                if (Math.hypot(player.x - p.x, player.y - p.y) < RADIUS * 2) {
+                    if (p.type === '*') player.hasOverdrive = true;
+                    if (p.type === 'x') player.hasBomb = true;
+                    if (p.type === '^') player.movesLeft += 1;
+                    if (p.type === 'o') player.hasShield = true;
+                    powerups.splice(i, 1);
+                }
+            }
+
+            // OOB Deaths (Only evaluate when stopped to avoid weird visual glitches while zooming out)
+            entities.forEach(e => {
+                if (!e.dead && !isPointInPoly({x: e.x, y: e.y}) && !e.isMoving()) {
+                    e.dead = true;
+                    leaveDeadCorpse(e.x, e.y);
+                    spawnParticles(e.x, e.y, 'death', 10, ['#f00', '#a00']);
                 }
             });
 
-            checkCollisions();
-            checkPowerupCollections();
+            entities = entities.filter(e => !e.dead);
 
-            let anyMoving = entities.some(e => e.isMoving() && !e.markedForDeath);
-
-            // Handle Out Of Bounds deaths (only when stopped or very slow)
-            entities.forEach(e => {
-                if (!e.markedForDeath && !isPointInPoly(mapPolygon, e.x, e.y) && !e.isMoving()) {
-                    e.markedForDeath = true;
-                    spawnParticlesAtEdge(e.x, e.y);
-                    
-                    // Spawn 'I's if it's 'Y'
-                    if (e.eType === 'Y') {
-                        // Spawn 2 I's pushing slightly towards center
-                        for(let k=0; k<2; k++) {
-                            let nE = new Entity(e.x, e.y, false, 'I');
-                            // Aim at center
-                            let angle = Math.atan2(mapCenter.y - e.y, mapCenter.x - e.x) + (Math.random()*0.5-0.25);
-                            nE.vx = Math.cos(angle) * 10;
-                            nE.vy = Math.sin(angle) * 10;
-                            entities.push(nE);
-                        }
-                        anyMoving = true; // We just created moving entities
-                    }
-                }
-            });
-
-            if (anyMoving) {
-                if(gameState !== 'MOVING') gameState = 'MOVING';
-                return;
-            }
-
-            // CLEANUP DEAD
-            entities = entities.filter(e => !e.markedForDeath);
-
-            // WIN/LOSS CHECK
-            if (!entities.includes(player)) {
-                gameState = 'GAME_OVER';
-                return;
-            }
-            
+            // Win/Loss
+            if (!entities.includes(player)) { gameState = 'GAME_OVER'; return; }
             let enemies = entities.filter(e => !e.isPlayer);
-            if (enemies.length === 0) {
-                gameState = 'NEXT_LEVEL';
-                currentLevel++;
+            if (enemies.length === 0 && movingCount === 0) { gameState = 'NEXT_LEVEL'; currentLevel++; return; }
+
+            if (movingCount > 0) {
+                if (gameState !== 'MOVING') gameState = 'MOVING';
                 return;
             }
 
-            // Transition logic when everything is stopped
+            // Once everything is stopped
             if (gameState === 'MOVING') {
-                // If it was player's turn that just finished
+                let continued = evaluateStops();
+                if (continued) return; // Keep moving due to explosions/bombs
+
                 if (activeEnemy === null) {
-                    triggerEndEffects(player);
-                    
+                    // Player's move just finished
                     if (player.movesLeft > 0) {
-                        gameState = 'PLAYER_AIM';
+                        gameState = 'PLAYER_TURN';
                     } else {
-                        // Reset player buffs that last 1 turn
-                        player.piercing = false; 
-                        
-                        // Start enemy queue
-                        enemyQueue = entities.filter(e => !e.isPlayer);
-                        // Sort by Y position just to have a predictable order
-                        enemyQueue.sort((a,b) => a.y - b.y); 
+                        player.hasOverdrive = false; // Reset 1-turn buffs
+                        enemyQueue = entities.filter(e => !e.isPlayer).sort((a,b) => a.y - b.y);
                         gameState = 'ENEMY_TURN';
                     }
                 } else {
-                    // It was an enemy's move that finished
-                    triggerEndEffects(activeEnemy);
-                    
-                    if (!activeEnemy.markedForDeath && activeEnemy.movesLeft > 0) {
-                        // Same enemy goes again (like K)
+                    // Enemy's move just finished
+                    if (!activeEnemy.dead && activeEnemy.movesLeft > 0) {
                         executeEnemyMove(activeEnemy);
                     } else {
                         activeEnemy = null;
                         gameState = 'ENEMY_TURN';
                     }
                 }
-                
-                // Triggers could have added movement (e.g. Bomba push)
-                if (entities.some(e => e.isMoving())) {
-                    gameState = 'MOVING';
-                    return;
-                }
             }
 
             if (gameState === 'ENEMY_TURN') {
                 if (enemyQueue.length > 0) {
                     activeEnemy = enemyQueue.shift();
-                    activeEnemy.movesLeft--;
-                    executeEnemyMove(activeEnemy);
+                    if(!activeEnemy.dead) {
+                        activeEnemy.movesLeft--;
+                        executeEnemyMove(activeEnemy);
+                    }
                 } else {
-                    // All enemies moved. Player turn.
                     activeEnemy = null;
                     player.movesLeft = 1;
-                    player.playerShield = false; // Shield wears off
-                    gameState = 'PLAYER_AIM';
+                    player.hasShield = false; 
+                    gameState = 'PLAYER_TURN';
                 }
             }
         }
 
         function executeEnemyMove(enemy) {
-            if (enemy.markedForDeath || !entities.includes(enemy)) return; // Failsafe
-            
             let dx = player.x - enemy.x;
             let dy = player.y - enemy.y;
             let dist = Math.hypot(dx, dy);
             
-            let power = enemy.power;
-            
+            let power = enemy.power * 8; // base speed multiplier
             enemy.vx = (dx / dist) * power;
             enemy.vy = (dy / dist) * power;
-            
+            enemy.tick = 0;
             gameState = 'MOVING';
         }
 
-        function drawMagma() {
-            ctx.fillStyle = '#050';
-            ctx.font = `bold 14px 'Courier New', monospace`;
-            let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*";
-            
+        function drawMagmaAndMap() {
+            // Draw Magma everywhere
+            ctx.fillStyle = '#030';
+            ctx.font = `14px 'Courier New', monospace`;
+            let time = Date.now() / 200;
             magmaGrid.forEach(cell => {
-                cell.timer++;
-                if (cell.timer > 10) { // update char occasionally
-                    cell.timer = 0;
-                    if(Math.random() > 0.8) cell.char = chars[Math.floor(Math.random() * chars.length)];
+                if ((cell.offset + time) % 20 < 1) {
+                    cell.char = "01#$%&@*+/\\~"[Math.floor(Math.random() * 12)];
                 }
+                ctx.fillStyle = ((cell.offset + time) % 100 < 50) ? '#050' : '#040';
                 ctx.fillText(cell.char, cell.x, cell.y);
             });
-        }
 
-        function drawMap() {
-            if (mapPolygon.length === 0) return;
-            
-            // Draw Magma background first
-            drawMagma();
-
-            // Draw inner black map
-            ctx.beginPath();
-            ctx.moveTo(mapPolygon[0].x, mapPolygon[0].y);
-            for (let i = 1; i < mapPolygon.length; i++) {
-                ctx.lineTo(mapPolygon[i].x, mapPolygon[i].y);
-            }
-            ctx.closePath();
-            ctx.fillStyle = '#000';
-            ctx.fill();
-            ctx.strokeStyle = '#0f0';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-
-            // Draw dead particles on map
-            ctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
-            ctx.font = `bold 12px 'Courier New', monospace`;
-            deadParticles.forEach(p => {
-                ctx.fillText(p.char, p.x, p.y);
-            });
-        }
-
-        function drawSlingshot() {
-            if (gameState === 'PLAYER_DRAG' && player) {
-                let dx = player.x - mouse.x;
-                let dy = player.y - mouse.y;
-                let dist = Math.hypot(dx, dy);
-                
-                // Clamp display line
-                if (dist > MAX_DRAG) {
-                    dx = (dx / dist) * MAX_DRAG;
-                    dy = (dy / dist) * MAX_DRAG;
-                }
-
+            // Draw Black map polygon over it
+            if (mapPolygon.length > 0) {
                 ctx.beginPath();
-                ctx.moveTo(player.x, player.y);
-                ctx.lineTo(player.x + dx, player.y + dy);
-                ctx.strokeStyle = player.piercing ? '#ff0' : '#0f0';
-                ctx.lineWidth = 2;
-                ctx.setLineDash([5, 5]);
-                ctx.stroke();
-                ctx.setLineDash([]);
+                ctx.moveTo(mapPolygon[0].x, mapPolygon[0].y);
+                for(let i=1; i<mapPolygon.length; i++) ctx.lineTo(mapPolygon[i].x, mapPolygon[i].y);
+                ctx.closePath();
+                ctx.fillStyle = '#000'; ctx.fill();
+                ctx.strokeStyle = '#0f0'; ctx.lineWidth = 2; ctx.stroke();
             }
+
+            // Draw dead particles
+            ctx.fillStyle = '#800'; // Dark red
+            ctx.font = `bold 14px 'Courier New', monospace`;
+            deadParticles.forEach(p => { ctx.fillText(p.char, p.x, p.y); });
         }
 
         function drawHUD() {
             ctx.fillStyle = '#0f0';
             ctx.font = `bold 20px 'Courier New', monospace`;
             ctx.textAlign = 'left';
-            ctx.fillText(`SYSTEM LEVEL: ${currentLevel}`, 20, 30);
+            ctx.fillText(`SISTEMA NIVEL: ${currentLevel}`, 20, 30);
             
             let enemyCount = entities.filter(e => !e.isPlayer).length;
             ctx.textAlign = 'right';
-            ctx.fillText(`THREATS: ${enemyCount}`, width - 20, 30);
+            ctx.fillText(`AMENAZAS: ${enemyCount}`, width - 20, 30);
             
             ctx.textAlign = 'center';
-            if (gameState === 'PLAYER_AIM') {
-                ctx.fillText("> AWAITING_INPUT (Tu Turno)", width / 2, 30);
+            if (gameState === 'PLAYER_TURN') {
+                ctx.fillText("> ESPERANDO_INPUT (Tu Turno)", cx, 30);
                 if (player && player.movesLeft > 1) {
-                    ctx.fillStyle = '#ff0';
-                    ctx.fillText(`(Lanzamientos restantes: ${player.movesLeft})`, width / 2, 60);
+                    ctx.fillStyle = '#ff0'; ctx.fillText(`[ Lanzamientos: ${player.movesLeft} ]`, cx, 60);
                 }
             } else if (gameState === 'ENEMY_TURN' || (gameState === 'MOVING' && activeEnemy)) {
-                ctx.fillStyle = '#f00';
-                ctx.fillText("> ENEMY_EXECUTING...", width / 2, 30);
+                ctx.fillStyle = '#f00'; ctx.fillText("> ENEMIGO EJECUTANDO...", cx, 30);
             }
 
-            // Status Overlays
+            // Overlay Screens
             if (gameState === 'START') {
                 ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0,0,width,height);
                 ctx.fillStyle = '#0f0'; ctx.font = `bold 40px 'Courier New', monospace`;
-                ctx.fillText("ASCII VIRUS: ROOT ACCESS", width/2, height/2 - 60);
+                ctx.fillText("ASCII VIRUS: INYECCIÓN", cx, cy - 60);
                 ctx.font = `20px 'Courier New', monospace`;
-                ctx.fillText("Arrastra desde [V] en dirección opuesta para impulsarte.", width/2, height/2);
-                ctx.fillText("Empuja enemigos fuera del borde verde para eliminarlos.", width/2, height/2 + 30);
-                ctx.fillText("- CLICK PARA INICIAR -", width/2, height/2 + 80);
+                ctx.fillText("Arrastra desde el virus [@] para impulsarte.", cx, cy);
+                ctx.fillText("Empuja enemigos fuera del borde verde (magma) para destruirlos.", cx, cy + 30);
+                ctx.fillText("- CLICK PARA INICIAR -", cx, cy + 80);
             } else if (gameState === 'GAME_OVER') {
-                ctx.fillStyle = 'rgba(255,0,0,0.3)'; ctx.fillRect(0,0,width,height);
+                ctx.fillStyle = 'rgba(255,0,0,0.4)'; ctx.fillRect(0,0,width,height);
                 ctx.fillStyle = '#f00'; ctx.font = `bold 50px 'Courier New', monospace`;
-                ctx.fillText("SISTEMA PURGADO", width/2, height/2 - 20);
+                ctx.fillText("SISTEMA PURGADO", cx, cy - 20);
                 ctx.font = `24px 'Courier New', monospace`;
-                ctx.fillText("El virus fue neutralizado.", width/2, height/2 + 30);
-                ctx.fillText("- CLICK PARA REINTENTAR -", width/2, height/2 + 80);
+                ctx.fillText("El virus fue eliminado.", cx, cy + 30);
+                ctx.fillText("- CLICK PARA REINICIAR -", cx, cy + 80);
             } else if (gameState === 'NEXT_LEVEL') {
-                ctx.fillStyle = 'rgba(0,255,0,0.2)'; ctx.fillRect(0,0,width,height);
+                ctx.fillStyle = 'rgba(0,255,0,0.3)'; ctx.fillRect(0,0,width,height);
                 ctx.fillStyle = '#0f0'; ctx.font = `bold 50px 'Courier New', monospace`;
-                ctx.fillText("NODO INFECTADO", width/2, height/2 - 20);
+                ctx.fillText("NODO COMPROMETIDO", cx, cy - 20);
                 ctx.font = `24px 'Courier New', monospace`;
-                ctx.fillText("Preparando avance a siguiente nivel...", width/2, height/2 + 30);
-                ctx.fillText("- CLICK PARA CONTINUAR -", width/2, height/2 + 80);
+                ctx.fillText("Avanzando a siguiente sector...", cx, cy + 30);
+                ctx.fillText("- CLICK PARA CONTINUAR -", cx, cy + 80);
             }
+        }
 
-            // Tooltip rendering
+        function updateTooltip() {
             if (hoveredEntity && gameState !== 'START' && gameState !== 'GAME_OVER' && gameState !== 'NEXT_LEVEL') {
-                let text = hoveredEntity.isPlayer ? "Virus (Tú)" : 
-                           (hoveredEntity.def ? hoveredEntity.def.desc : 
-                           (ENEMY_TYPES[hoveredEntity.eType] ? ENEMY_TYPES[hoveredEntity.eType].desc : "Unknown"));
+                let name = "", desc = "";
+                if (hoveredEntity.isPlayer) {
+                    name = "Virus"; desc = "Tú. Arrastra para moverte.";
+                } else if (hoveredEntity.type && ENEMY_DEFS[hoveredEntity.type]) {
+                    name = hoveredEntity.type === '10' ? "Enemigo 10" : `Enemigo ${hoveredEntity.type}`;
+                    desc = ENEMY_DEFS[hoveredEntity.type].desc;
+                } else if (POWERUP_DEFS[hoveredEntity.type]) {
+                    name = `Powerup: ${POWERUP_DEFS[hoveredEntity.type].name}`;
+                    desc = POWERUP_DEFS[hoveredEntity.type].desc;
+                }
+
+                tooltip.innerHTML = `<strong>${name}</strong>${desc}`;
+                tooltip.style.display = 'block';
                 
-                let title = hoveredEntity.def ? hoveredEntity.def.type : (hoveredEntity.eType ? hoveredEntity.eType : "Virus");
-
-                ctx.font = `14px 'Courier New', monospace`;
-                let tw = Math.max(ctx.measureText(title).width, ctx.measureText(text).width) + 20;
-                let th = 50;
-                let tx = mouse.x + 15;
-                let ty = mouse.y + 15;
+                let tx = mouse.x + 15; let ty = mouse.y + 15;
+                if (tx + 300 > width) tx = mouse.x - tooltip.offsetWidth - 15;
+                if (ty + 100 > height) ty = mouse.y - tooltip.offsetHeight - 15;
                 
-                // Keep tooltip on screen
-                if (tx + tw > width) tx = mouse.x - tw - 15;
-                if (ty + th > height) ty = mouse.y - th - 15;
-
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
-                ctx.strokeStyle = hoveredEntity.def ? '#ff0' : (hoveredEntity.isPlayer ? '#0f0' : '#f00');
-                ctx.lineWidth = 1;
-                ctx.fillRect(tx, ty, tw, th);
-                ctx.strokeRect(tx, ty, tw, th);
-
-                ctx.fillStyle = ctx.strokeStyle;
-                ctx.textAlign = 'left';
-                ctx.fillText(`[${title}]`, tx + 10, ty + 15);
-                ctx.fillStyle = '#fff';
-                ctx.fillText(text, tx + 10, ty + 35);
+                tooltip.style.left = tx + 'px';
+                tooltip.style.top = ty + 'px';
+            } else {
+                tooltip.style.display = 'none';
             }
         }
 
         function gameLoop() {
+            globalTick++;
             ctx.clearRect(0, 0, width, height);
             
-            drawMap();
+            drawMagmaAndMap();
             
             if (gameState !== 'START') {
                 powerups.forEach(p => p.draw());
                 entities.forEach(e => e.draw());
-                drawSlingshot();
+                
+                // Draw Slingshot
+                if (gameState === 'PLAYER_DRAG' && player) {
+                    let dx = player.x - mouse.x; let dy = player.y - mouse.y;
+                    let dist = Math.hypot(dx, dy);
+                    if (dist > MAX_DRAG) { dx = (dx/dist)*MAX_DRAG; dy = (dy/dist)*MAX_DRAG; }
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(player.x, player.y);
+                    ctx.lineTo(player.x + dx, player.y + dy);
+                    ctx.strokeStyle = player.hasOverdrive ? '#ff0' : '#0ff';
+                    ctx.lineWidth = 2; ctx.setLineDash([4, 4]); ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                // Update & Draw Particles
+                ctx.font = `bold 12px 'Courier New', monospace`;
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    let p = particles[i];
+                    p.x += p.vx; p.y += p.vy;
+                    p.vx *= 0.9; p.vy *= 0.9;
+                    p.life -= p.decay;
+                    if (p.life <= 0) { particles.splice(i, 1); continue; }
+                    ctx.globalAlpha = p.life;
+                    ctx.fillStyle = p.color;
+                    ctx.fillText(p.char, p.x, p.y);
+                }
+                ctx.globalAlpha = 1.0;
+
                 manageTurns();
             }
 
             drawHUD();
+            updateTooltip();
             
             requestAnimationFrame(gameLoop);
         }
 
-        // Initialize display before start
         resize();
         gameLoop();
-
     </script>
 </body>
 </html>
